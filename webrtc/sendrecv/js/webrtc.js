@@ -228,8 +228,7 @@ function onRemoteTrack(event) {
     cell.appendChild(video);
     row.appendChild(cell);
 
-    video.srcObject = event.streams[0];
-
+    video.srcObject = new MediaStream([event.track]);
 }
 
 const handleDataChannelOpen = (event) =>{
