@@ -15,29 +15,36 @@ from gi.repository import GstWebRTC
 gi.require_version('GstSdp', '1.0')
 from gi.repository import GstSdp
 
+from threading import Timer
+
+# Pipeline with unoptimized H264 stream
 # PIPELINE_DESC = '''
-# webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
-# autovideosrc device=/dev/video0 ! videoconvert ! queue !
-# x264enc ! video/x-h264, profile=baseline ! rtph264pay !
-# queue ! application/x-rtp,media=video,encoding-name=H264,payload=96  ! sendrecv.
+#   webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+#     autovideosrc device=/dev/video0 ! videoconvert ! queue !
+#     x264enc ! video/x-h264, profile=baseline ! rtph264pay !
+#     queue ! application/x-rtp,media=video,encoding-name=H264,payload=96  ! sendrecv.
 # '''
 
-PIPELINE_DESC = '''
-webrtcbin name=sendrecv bundle-policy=max-bundle
- autovideosrc device=/dev/video0            ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
- videotestsrc is-live=true pattern=snow     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
- videotestsrc is-live=true pattern=ball     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
- videotestsrc is-live=true pattern=smpte    ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
- videotestsrc is-live=true pattern=gradient ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
-'''
+# Here's is the full pipeline (with 5 sources to be BUNDLED into one stream)
+#   webrtcbin name=sendrecv bundle-policy=max-bundle
+#     videotestsrc is-live=true pattern=snow     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+#     videotestsrc is-live=true pattern=ball     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+#     videotestsrc is-live=true pattern=smpte    ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+#     videotestsrc is-live=true pattern=gradient ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+#
 
-## TODO: Create 16 low-quality channels
+# Pipeline that we'll extend dynamically
+PIPELINE_DESC = '''
+  webrtcbin name=sendrecv bundle-policy=max-bundle
+    autovideosrc device=/dev/video0            ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+'''
 
 from websockets.version import version as wsv
 
 class WebRTCClient:
     def __init__(self, id_, peer_id, server):
         self.id_ = id_
+        self.idx = 0
         self.conn = None
         self.pipe = None
         self.webrtc = None
@@ -85,6 +92,58 @@ class WebRTCClient:
         self.webrtc = self.pipe.get_by_name('sendrecv')
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.send_ice_candidate_message)
+        self.pipe.set_state(Gst.State.PLAYING)
+
+        # Wait then add some test sources
+        async_test1 = Timer(2.0, self.add_test_src, ["snow"],{})
+        async_test1.start()
+        async_test2 = Timer(4.0, self.add_test_src, ["ball"],{})
+        async_test2.start()
+        async_test3 = Timer(6.0, self.add_test_src, ["smpte"],{})
+        async_test3.start()
+
+    def add_test_src(self, pattern):
+        self.idx = self.idx + 1
+        print ("Adding test source (%s) for pod nr %s\n" % (pattern, self.idx))
+
+        # Take source
+        test_src = Gst.ElementFactory.make("videotestsrc",      "test_src_%s" % self.idx)
+        test_src.set_property("is-live", "true")
+        test_src.set_property("pattern", pattern)
+
+        # split frames
+        converter = Gst.ElementFactory.make("videoconvert",     "test_con_%s" % self.idx)
+
+        # encode
+        encoder = Gst.ElementFactory.make("vp8enc",             "test_enc_%s" % self.idx)
+        encoder.set_property("deadline", 1)
+
+        # wrap (puts VP8 video in RTP packets)
+        rtp = Gst.ElementFactory.make("rtpvp8pay",              "test_rtp_%s" % self.idx)
+
+        # Set caps (capabilities - lightweight refcounted objects describing media types)
+        cap = "application/x-rtp,media=video,encoding-name=VP8,payload=97"
+        caps = Gst.caps_from_string(cap)
+        caps_filter = Gst.ElementFactory.make("capsfilter",     "test_cap_%s" % self.idx)
+        caps_filter.set_property("caps", caps)
+
+        # add to pipeline and link
+        self.pipe.add(test_src)
+        self.pipe.add(converter)
+        self.pipe.add(encoder)
+        self.pipe.add(rtp)
+        self.pipe.add(caps_filter)
+
+        test_src.link(converter)
+        converter.link(encoder)
+        encoder.link(rtp)
+        rtp.link(caps_filter)
+        caps_filter.link(self.webrtc)
+
+        self.start_stop_stream()
+
+    def start_stop_stream(self):
+        self.pipe.set_state(Gst.State.PAUSED)
         self.pipe.set_state(Gst.State.PLAYING)
 
     def handle_sdp(self, message):
