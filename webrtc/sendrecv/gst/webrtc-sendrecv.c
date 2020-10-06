@@ -376,14 +376,14 @@ start_pipeline (void)
 {
   GstStateChangeReturn ret;
   GError *error = NULL;
-
+;
   pipe1 =
-      gst_parse_launch ("webrtcbin bundle-policy=max-bundle name=sendrecv "
-      STUN_SERVER
-      "autovideosrc device=/dev/video0 ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! "
-      "queue ! " RTP_CAPS_VP8 "96 ! sendrecv. "
-      "audiotestsrc is-live=true wave=red-noise ! audioconvert ! audioresample ! queue ! opusenc ! rtpopuspay ! "
-      "queue ! " RTP_CAPS_OPUS "97 ! sendrecv. ", &error);
+      gst_parse_launch ("webrtcbin name=sendrecv bundle-policy=max-bundle "
+      "autovideosrc device=/dev/video0            ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv."
+      "videotestsrc is-live=true pattern=ball     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv."
+      "videotestsrc is-live=true pattern=smpte    ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv."
+      "videotestsrc is-live=true pattern=snow     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv."
+      "videotestsrc is-live=true pattern=gradient ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.", &error);
 
   if (error) {
     gst_printerr ("Failed to parse launch: %s\n", error->message);

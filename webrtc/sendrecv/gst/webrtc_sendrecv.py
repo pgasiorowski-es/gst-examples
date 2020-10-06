@@ -1,3 +1,18 @@
+
+'''
+  1. Run HOST the UI
+
+  cd ~/development/gst-examples/webrtc/sendrecv/js
+  http-server --ssl --cert /etc/editshare/ssl/server-cert.pem --key /etc/editshare/ssl/server.key
+
+  2. Run the signaling server and GStreamer Peer:
+
+  cd ~/development/gst-examples/webrtc/sendrecv/gst
+  python3 webrtc_signalling.py
+  python3 webrtc_sendrecv.py
+
+'''
+
 import random
 import ssl
 import websockets
@@ -17,56 +32,52 @@ from gi.repository import GstSdp
 
 from threading import Timer
 
-# Pipeline with unoptimized H264 stream
-# PIPELINE_DESC = '''
-#   webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
-#     autovideosrc device=/dev/video0 ! videoconvert ! queue !
-#     x264enc ! video/x-h264, profile=baseline ! rtph264pay !
-#     queue ! application/x-rtp,media=video,encoding-name=H264,payload=96  ! sendrecv.
-# '''
+# STUN_SERVER = 'stun:stun.services.mozilla.com'
+# STUN_SERVER = 'stun://stun.services.mozilla.com'
+STUN_SERVER = 'stun://stun.l.google.com:19302'
 
 # Here's is the full pipeline (with 5 sources to be BUNDLED into one stream)
-#   webrtcbin name=sendrecv bundle-policy=max-bundle
+#   webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
 #     videotestsrc is-live=true pattern=snow     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
 #     videotestsrc is-live=true pattern=ball     ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
 #     videotestsrc is-live=true pattern=smpte    ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
 #     videotestsrc is-live=true pattern=gradient ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay ! queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
-#
 
-# Pipeline that we'll extend dynamically
+# Pipeline with fakesink that we'll extend dynamically
 PIPELINE_DESC = '''
-  webrtcbin name=sendrecv bundle-policy=max-bundle
-    autovideosrc device=/dev/video0            ! videoconvert ! queue ! vp8enc deadline=1 ! rtpvp8pay !  queue ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! sendrecv.
+    autovideosrc device=/dev/video0 ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod teapod. ! queue ! fakesink
 '''
 
 from websockets.version import version as wsv
 
 class WebRTCClient:
-    def __init__(self, id_, peer_id, server):
+    def __init__(self, id_, server):
         self.id_ = id_
         self.idx = 0
         self.conn = None
         self.pipe = None
-        self.webrtc = None
-        self.peer_id = peer_id
-        self.server = server or 'wss://webrtc.nirbheek.in:8443'
+        self.rtp = None
+        self.server = server or 'wss://127.0.0.1:8443'
 
+        # TODO: Handle this to support multiple clients
+        self.peer_id = None
+        self.webrtc = None
 
     async def connect(self):
         sslctx = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
         self.conn = await websockets.connect(self.server, ssl=sslctx)
-        await self.conn.send('HELLO %d' % self.id_)
+        await self.conn.send('HELLO_SERVER')
 
-    async def setup_call(self):
-        await self.conn.send('SESSION {}'.format(self.peer_id))
-
-    def send_sdp_offer(self, offer):
-        text = offer.sdp.as_text()
-        print ('Sending offer:\n%s' % text)
-        msg = json.dumps({'sdp': {'type': 'offer', 'sdp': text}})
+    def msg_peer(self, msg):
+        data = 'MSG_PEER %s %s' % ( self.peer_id, msg )
+    
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(self.conn.send(msg))
+        loop.run_until_complete(self.conn.send(data))
         loop.close()
+
+    def on_negotiation_needed(self, element):
+        promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
+        element.emit('create-offer', None, promise)
 
     def on_offer_created(self, promise, _, __):
         promise.wait()
@@ -77,34 +88,30 @@ class WebRTCClient:
         promise.interrupt()
         self.send_sdp_offer(offer)
 
-    def on_negotiation_needed(self, element):
-        promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
-        element.emit('create-offer', None, promise)
+    def send_sdp_offer(self, offer):
+        text = offer.sdp.as_text()
+        print ('Sending offer:\n%s' % text)
+        msg = json.dumps({'sdp': {'type': 'offer', 'sdp': text}})
+        self.msg_peer(msg)
 
     def send_ice_candidate_message(self, _, mlineindex, candidate):
         icemsg = json.dumps({'ice': {'candidate': candidate, 'sdpMLineIndex': mlineindex}})
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(self.conn.send(icemsg))
-        loop.close()
+        self.msg_peer(icemsg)
 
     def start_pipeline(self):
         self.pipe = Gst.parse_launch(PIPELINE_DESC)
-        self.webrtc = self.pipe.get_by_name('sendrecv')
-        self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
-        self.webrtc.connect('on-ice-candidate', self.send_ice_candidate_message)
-        self.pipe.set_state(Gst.State.PLAYING)
 
         # Wait then add some test sources
-        async_test1 = Timer(2.0, self.add_test_src, ["snow"],{})
-        async_test1.start()
-        async_test2 = Timer(4.0, self.add_test_src, ["ball"],{})
-        async_test2.start()
-        async_test3 = Timer(6.0, self.add_test_src, ["smpte"],{})
-        async_test3.start()
+        # async_test1 = Timer(5.0, self.add_test_src, ["snow"],{})
+        # async_test1.start()
+        # async_test2 = Timer(10.0, self.add_test_src, ["ball"],{})
+        # async_test2.start()
+        # async_test3 = Timer(15.0, self.add_test_src, ["smpte"],{})
+        # async_test3.start()
 
     def add_test_src(self, pattern):
         self.idx = self.idx + 1
-        print ("Adding test source (%s) for pod nr %s\n" % (pattern, self.idx))
+        print ("Adding test source (%s) for pod nr %s" % (pattern, self.idx))
 
         # Take source
         test_src = Gst.ElementFactory.make("videotestsrc",      "test_src_%s" % self.idx)
@@ -138,13 +145,51 @@ class WebRTCClient:
         converter.link(encoder)
         encoder.link(rtp)
         rtp.link(caps_filter)
-        caps_filter.link(self.webrtc)
+        caps_filter.link(self.rtp)
 
-        self.start_stop_stream()
+        self.restart_stream()
 
-    def start_stop_stream(self):
-        self.pipe.set_state(Gst.State.PAUSED)
-        self.pipe.set_state(Gst.State.PLAYING)
+    def restart_stream(self):
+        if self.pipe.set_state == Gst.State.PLAYING:
+            self.pipe.set_state(Gst.State.PAUSED)
+            self.pipe.set_state(Gst.State.PLAYING)
+        else:
+            self.pipe.set_state(Gst.State.PLAYING)
+
+    def add_webrtc_peer(self, peer_id):
+        if self.peer_id == peer_id:
+            return print ("WARN: Peer already registered: %s" % peer_id) 
+
+        self.peer_id = peer_id
+
+        # Connect webrtcbin to running pipeline. There's the template that we'd normally use:
+        # queue ! webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
+
+        tee = self.pipe.get_by_name('teapod')
+
+        queue = Gst.ElementFactory.make('queue', 'queue_%s' % peer_id)
+
+        self.webrtc = Gst.ElementFactory.make('webrtcbin', 'webrtc_bin_%s' % peer_id)
+        self.webrtc.set_property('name', 'webrtc_bin_%s' % peer_id)
+        self.webrtc.set_property('bundle-policy', 'max-bundle')
+        self.webrtc.set_property('stun-server', STUN_SERVER)
+        self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
+        self.webrtc.connect('on-ice-candidate', self.send_ice_candidate_message)
+
+        self.pipe.add(queue)
+        self.pipe.add(self.webrtc)
+
+        tee.link(queue)
+        queue.link(self.webrtc)
+
+        print("Starting stream for peer %s" % peer_id)
+        self.restart_stream()
+
+    def remove_webrtc_peer(self, peer_id):
+        if self.webrtc:
+            self.rtp.unlink(self.webrtc)
+            self.pipe.remove(self.webrtc)
+            self.restart_stream()
 
     def handle_sdp(self, message):
         assert (self.webrtc)
@@ -170,19 +215,32 @@ class WebRTCClient:
     def close_pipeline(self):
         self.pipe.set_state(Gst.State.NULL)
         self.pipe = None
+        self.rtp = None
         self.webrtc = None
 
     async def loop(self):
         assert self.conn
         async for message in self.conn:
-            if message == 'HELLO':
-                await self.setup_call()
-            elif message == 'SESSION_OK':
+            print("signal: %s" % message); 
+
+            if message.startswith('HELLO'):
+                # Initially our pipline will stream to fakesink until browser connects 
+                print("Starting pipeline")
                 self.start_pipeline()
+                print("Started. Awaiting peers...")
+
+            elif message.startswith('PEER_CONNECTED'):
+                _, peer_id = message.split(maxsplit=1)
+                self.add_webrtc_peer(peer_id)
+
+            elif message.startswith('PEER_DISCONNECTED'):
+                _, peer_id = message.split(maxsplit=1)
+                self.remove_webrtc_peer(peer_id)
+
             elif message.startswith('ERROR'):
-                print (message)
                 self.close_pipeline()
                 return 1
+
             else:
                 self.handle_sdp(message)
         self.close_pipeline()
@@ -209,12 +267,14 @@ if __name__=='__main__':
     if not check_plugins():
         sys.exit(1)
     parser = argparse.ArgumentParser()
-    parser.add_argument('peerid', help='String ID of the peer to connect to')
     parser.add_argument('--server', help='Signalling server to connect to, eg "wss://127.0.0.1:8443"')
     args = parser.parse_args()
     our_id = random.randrange(10, 10000)
-    c = WebRTCClient(our_id, args.peerid, args.server)
+
+    c = WebRTCClient(our_id, args.server)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(c.connect())
     res = loop.run_until_complete(c.loop())
     sys.exit(res)
+
+

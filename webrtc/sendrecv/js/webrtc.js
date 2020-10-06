@@ -26,6 +26,7 @@ var connect_attempts = 0;
 var peer_connection;
 var send_channel;
 var ws_conn;
+var peer_id;
 
 function getOurId() {
     return Math.floor(Math.random() * (9000 - 10) + 10).toString();
@@ -91,9 +92,10 @@ function onIncomingSDP(sdp) {
 function onLocalDescription(desc) {
     console.log("Got local description: " + JSON.stringify(desc));
     peer_connection.setLocalDescription(desc).then(function() {
-        setStatus("Sending SDP " + desc.type);
         const sdp = {'sdp': peer_connection.localDescription}
-        ws_conn.send(JSON.stringify(sdp));
+
+        ws_conn.send('MSG_SERVER ' + JSON.stringify(sdp));
+        setStatus("Sent SDP " + desc.type);
 
         // setStatus("Signaling server to start pipeline" + desc.type);
         // ws_conn.send('SESSION_OK');
@@ -114,23 +116,16 @@ function onServerMessage(event) {
     console.log("Received " + event.data);
 
     if (event.data === "HELLO") {
-        return setStatus("Registered with server, waiting for call");
+        return setStatus("Received HELLO");
     }
 
     if (event.data.startsWith("ERROR")) {
         return handleIncomingError(event.data);
     }
 
-    // The peer wants us to set up and then send an offer
-    if (event.data.startsWith("OFFER_REQUEST")) {
-        // We should be ignore this for now
-        alert('OFFER_REQUEST');
-        if (!peer_connection)
-            createCall(null).then (generateOffer);
-        return;
+    if (event.data.startsWith("SERVER_CONNECTED")) {
+        return setStatus("Server connected restart");
     }
-
-    let msg;
 
     // Handle incoming JSON SDP and ICE messages
     try {
@@ -145,8 +140,9 @@ function onServerMessage(event) {
     }
 
     // Incoming JSON signals the beginning of a call
-    if (!peer_connection)
+    if (!peer_connection) {
         createCall(msg);
+    }
 
     if (msg.sdp != null) {
         onIncomingSDP(msg.sdp);
@@ -200,19 +196,19 @@ function websocketServerConnect() {
     var ws_url = 'wss://' + ws_server + ':' + ws_port
     setStatus("Connecting to server " + ws_url);
     ws_conn = new WebSocket(ws_url);
-    /* When connected, immediately register with the server */
-    ws_conn.addEventListener('open', (event) => {
-        document.getElementById("peer-id").textContent = peer_id;
-        ws_conn.send('HELLO ' + peer_id);
-        setStatus("Registering with server");
-    });
     ws_conn.addEventListener('error', onServerError);
     ws_conn.addEventListener('message', onServerMessage);
     ws_conn.addEventListener('close', onServerClose);
+
+    /* When connected, immediately register with the server */
+    ws_conn.addEventListener('open', (event) => {
+        document.getElementById("peer-id").textContent = peer_id;
+    });
 }
 
-function onRemoteStream(stream) {
-    console.log('onRemoteStream', stream);
+function initializeWebRTC() {
+    ws_conn.send('HELLO_PEER ' + peer_id);
+    setStatus("Registering with server");
 }
 
 function onRemoteTrack(event) {
@@ -280,7 +276,6 @@ function createCall(msg) {
     send_channel.onclose = handleDataChannelClose;
     peer_connection.ondatachannel = onDataChannel;
     peer_connection.ontrack = onRemoteTrack;
-    peer_connection.onaddstream = onRemoteStream;
 
     if (msg != null && !msg.sdp) {
         console.log("WARNING: First message wasn't an SDP message!?");
@@ -292,7 +287,8 @@ function createCall(msg) {
             return console.log("ICE Candidate was null, done");
         }
 
-        ws_conn.send(JSON.stringify({'ice': event.candidate}));
+        console.log("ICE Candidate added", event.candidate);
+        ws_conn.send('MSG_SERVER ' + JSON.stringify({'ice': event.candidate}));
     };
 
     if (msg != null) setStatus("Created peer connection for call, waiting for SDP");
