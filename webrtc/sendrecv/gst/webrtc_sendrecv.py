@@ -55,7 +55,11 @@ DEFAULT_STUN_SERVER = 'stun://stun.l.google.com:19302' # or 'stun://stun.service
 
 # Initial pipeline with RTP stream and fakesink that we'll extend dynamically as peers connect in
 PIPELINE_DESC = '''
-    autovideosrc device=/dev/video0 ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod teapod. ! queue ! fakesink
+    autovideosrc device=/dev/video0            ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod0 teapod0. ! fakesink
+    videotestsrc is-live=true pattern=snow     ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod1 teapod1. ! fakesink
+    videotestsrc is-live=true pattern=ball     ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod2 teapod2. ! fakesink
+    videotestsrc is-live=true pattern=smpte    ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod3 teapod3. ! fakesink
+    videotestsrc is-live=true pattern=gradient ! videoconvert ! vp8enc deadline=1 ! rtpvp8pay ! application/x-rtp,media=video,encoding-name=VP8,payload=97 ! tee name=teapod4 teapod4. ! fakesink
 '''
 
 
@@ -67,9 +71,7 @@ class GStreamberWebRTCBin:
         self.webrtc = None
 
         # Create webrtc bin (here's a template that we'd normally use):
-        # queue ! webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
-        self.queue = Gst.ElementFactory.make('queue', 'queue_%s' % peer_id)
-
+        # webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
         self.webrtc = Gst.ElementFactory.make('webrtcbin', 'webrtc_bin_%s' % peer_id)
         self.webrtc.set_property('name', 'webrtc_bin_%s' % peer_id)
         self.webrtc.set_property('bundle-policy', 'max-bundle')
@@ -77,8 +79,6 @@ class GStreamberWebRTCBin:
         self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
         self.webrtc.connect('on-ice-candidate', self.send_ice_candidate_message)
 
-    def get_queue(self):
-        return self.queue
 
     def get_sink(self):
         return self.webrtc
@@ -135,6 +135,7 @@ class GStreamerWebRTCPipeline:
 
         self.bins = dict()
         self.src_idx = 0
+        self.sources = []
 
         # Initially our pipline will stream to fakesink until browser connects 
         self.start_pipeline()
@@ -157,13 +158,23 @@ class GStreamerWebRTCPipeline:
         print("Starting pipeline")
         self.pipe = Gst.parse_launch(PIPELINE_DESC)
 
+        self.sources.append(self.pipe.get_by_name('teapod0'))
+        self.sources.append(self.pipe.get_by_name('teapod1'))
+        self.sources.append(self.pipe.get_by_name('teapod2'))
+        self.sources.append(self.pipe.get_by_name('teapod3'))
+        self.sources.append(self.pipe.get_by_name('teapod4'))
+
+    '''
+        Using one pipleine for all sources should be avoided.
+        One pipeline per source seems good for redundancy but how can we achive this?
+
         # Wait then add some test sources
-        # async_test1 = Timer(5.0, self.add_test_src, ["snow"],{})
-        # async_test1.start()
-        # async_test2 = Timer(10.0, self.add_test_src, ["ball"],{})
-        # async_test2.start()
-        # async_test3 = Timer(15.0, self.add_test_src, ["smpte"],{})
-        # async_test3.start()
+        async_test1 = Timer(1.0, self.add_test_src, ["snow"],{})
+        async_test1.start()
+        async_test2 = Timer(2.0, self.add_test_src, ["ball"],{})
+        async_test2.start()
+        async_test3 = Timer(3.0, self.add_test_src, ["smpte"],{})
+        async_test3.start()
 
     def add_test_src(self, pattern):
         self.src_idx = self.src_idx + 1
@@ -204,6 +215,7 @@ class GStreamerWebRTCPipeline:
         caps_filter.link(self.rtp)
 
         self.restart_stream()
+    '''
 
     def restart_stream(self):
         if self.pipe.get_state(1)[1] == Gst.State.PLAYING:
@@ -218,19 +230,19 @@ class GStreamerWebRTCPipeline:
 
         # Create new GStreamer webrtc bin and link it to our pipeline
         bin = self.bins[peer_id] = GStreamberWebRTCBin(self, peer_id)
-        queue = bin.get_queue()
         sink = bin.get_sink()
-
-        self.pipe.add(queue)
         self.pipe.add(sink)
 
-        tee = self.pipe.get_by_name('teapod')
-        tee.link(queue)
-        queue.link(sink)
+        # Connect each source to this peers's webrtc bin
+        for source in self.sources:
+            # A queue buffer is required for each pair of peer and source
+            queue = Gst.ElementFactory.make('queue')
+            self.pipe.add(queue)
+            source.link(queue)
+            queue.link(sink)
 
         print("Starting stream for peer %s" % peer_id)
         self.restart_stream()
-
 
     def msg_webrtc_peer(self, peer_id, msg):
         if peer_id not in self.bins:
@@ -254,11 +266,7 @@ class GStreamerWebRTCPipeline:
             self.pipe.set_state(Gst.State.PAUSED)
             needsRestart = True
 
-        queue = self.bins[peer_id].get_queue()
         sink = self.bins[peer_id].get_sink()
-
-        queue.unlink(sink)
-        self.pipe.remove(queue)
         self.pipe.remove(sink)
         del self.bins[peer_id]
 

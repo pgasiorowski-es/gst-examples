@@ -29,6 +29,7 @@ var ws_conn;
 var peer_id;
 
 function getOurId() {
+    // TODO: We'd better off generating UUIDs
     return Math.floor(Math.random() * (900000 - 1000) + 1000).toString();
 }
 
