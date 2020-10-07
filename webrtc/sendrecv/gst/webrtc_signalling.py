@@ -70,8 +70,11 @@ class WebRTCSignalingServer(object):
 
             print(msg)
 
-            # GStreamer server connected: 
-            # HELLO_SERVER
+            # GStreamer server connected:
+            #
+            # HELLO_SERVER -> HELLO (to server)
+            #              -> SERVER_CONNECTED (to peers)
+            #
             if msg.startswith('HELLO_SERVER'):
                 print ('GStreamer connected')
                 self.gstreamer = ws
@@ -81,9 +84,11 @@ class WebRTCSignalingServer(object):
                 for peer_id in self.peers:
                     await self.peers[peer_id].send('SERVER_CONNECTED')
 
-
             # Browser connected
-            # HELLO_PEER 1234
+            #
+            # HELLO_PEER 1234 -> HELLO (to peer)
+            #               * -> PEER_CONNECTED 123 (to server)
+            #
             elif msg.startswith('HELLO_PEER'):
                 _, peer_id = msg.split(maxsplit=1)
                 self.peers[peer_id] = ws
@@ -93,23 +98,31 @@ class WebRTCSignalingServer(object):
                 if self.gstreamer:
                     await self.gstreamer.send('PEER_CONNECTED %s' % peer_id)
 
-            # Browser wants to message server
-            # MSG_SERVER {"sdp": {...}}
+            # Peer wants to message server
+            #
+            # MSG_SERVER 1234 json -> PEER_MESSAGE 1234 json (to server)
+            #
             elif msg.startswith('MSG_SERVER'):
-                _, json = msg.split(maxsplit=1)
+                _, peer_id, json = msg.split(maxsplit=2)
                 if self.gstreamer:
-                    await self.gstreamer.send(json)
+                    await self.gstreamer.send('PEER_MESSAGE %s %s' % (peer_id, json))
                 else:
-                    print('WARN: Server not set yet')
+                    print('WARN: Server not set yet. Discarding message')
 
-            # Server wants to meesage prowser
-            # MSG_PEER 1234 {"sdp": {...}}
+            # Server wants to meesage browser
+            #
+            # MSG_PEER 1234 json -> json (to browser)
+            #
             elif msg.startswith('MSG_PEER'):
                 _, peer_id, json = msg.split(maxsplit=2)
                 if self.peers[peer_id]:
                     await self.peers[peer_id].send(json)
                 else:
                     print('WARN: Peer %s does not exist' % peer_id)
+
+            else:
+                print('WARN: Peer %s does not exist' % peer_id)
+
 
     def get_ssl_certs(self):
         chain_pem = '/etc/editshare/ssl/server-cert.pem'
@@ -147,10 +160,14 @@ class WebRTCSignalingServer(object):
                 print("Connection to peer {!r} closed, exiting handler".format(raddr))
             finally:
                 if self.gstreamer == ws:
+                    # Server disconnected
                     self.gstreamer = None
                 else:
+                    # Peer disconnected
+                    print("Peer was disconnected")
                     for peer_id in self.peers:
                         if self.peers[peer_id] == ws:
+                            await self.gstreamer.send('PEER_DISCONNECTED %s' % peer_id)
                             del self.peers[peer_id]
 
 

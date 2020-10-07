@@ -29,7 +29,7 @@ var ws_conn;
 var peer_id;
 
 function getOurId() {
-    return Math.floor(Math.random() * (9000 - 10) + 10).toString();
+    return Math.floor(Math.random() * (900000 - 1000) + 1000).toString();
 }
 
 function resetState() {
@@ -94,7 +94,7 @@ function onLocalDescription(desc) {
     peer_connection.setLocalDescription(desc).then(function() {
         const sdp = {'sdp': peer_connection.localDescription}
 
-        ws_conn.send('MSG_SERVER ' + JSON.stringify(sdp));
+        ws_conn.send('MSG_SERVER ' + peer_id + ' ' + JSON.stringify(sdp));
         setStatus("Sent SDP " + desc.type);
 
         // setStatus("Signaling server to start pipeline" + desc.type);
@@ -288,7 +288,8 @@ function createCall(msg) {
         }
 
         console.log("ICE Candidate added", event.candidate);
-        ws_conn.send('MSG_SERVER ' + JSON.stringify({'ice': event.candidate}));
+        ws_conn.send('MSG_SERVER ' + peer_id + ' ' + JSON.stringify({'ice': event.candidate}));
+        setStatus("Sent ICE candidates");
     };
 
     if (msg != null) setStatus("Created peer connection for call, waiting for SDP");
